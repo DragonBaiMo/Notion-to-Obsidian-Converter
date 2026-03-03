@@ -4,6 +4,10 @@ const npath = require('path');
 
 let exportPath;
 
+// Notion exports usually append a 32-char UUID to file/folder names.
+// We remove only that UUID suffix instead of truncating by "last space".
+const NOTION_UUID_SUFFIX_REGEX = /(?:[\s-])?[0-9a-f]{32}$/i;
+
 const flags = {
 	logging: 1,
 }
@@ -149,24 +153,27 @@ function main() {
 
 const truncateFileName = (name) => {
 	vlog(4, `Truncating file name: ${name}`);
-	let bn = npath.basename(name);
-	bn = bn.lastIndexOf(' ') > 0 ? bn.substring(0, bn.lastIndexOf(' ')) : bn;
+	const ext = npath.extname(name);
+	const stem = npath.basename(name, ext);
+	const trimmedStem = stem.replace(NOTION_UUID_SUFFIX_REGEX, '').trim();
+	const safeStem = trimmedStem.length ? trimmedStem : stem;
 	return npath.resolve(
 		npath.format({
 			dir: npath.dirname(name),
-			base: bn + npath.extname(name),
+			base: safeStem + ext,
 		})
 	);
 };
 
 const truncateDirName = (name) => {
 	vlog(4, `Truncating directory name: ${name}`);
-	let bn = npath.basename(name);
-	bn = bn.lastIndexOf(' ') > 0 ? bn.substring(0, bn.lastIndexOf(' ')) : bn;
+	const bn = npath.basename(name);
+	const trimmed = bn.replace(NOTION_UUID_SUFFIX_REGEX, '').trim();
+	const safe = trimmed.length ? trimmed : bn;
 	return npath.resolve(
 		npath.format({
 			dir: npath.dirname(name),
-			base: bn,
+			base: safe,
 		})
 	);
 };
@@ -263,16 +270,27 @@ const convertPNGPath = (path) => {
 
 const convertNotionLinks = (match, p1, p2, p3) => {
 	vlog(4, `Converting Notion.so link: ${match}`);
-	return `[[${tryDecodeURI(match
-		.substring(match.lastIndexOf('/') + 1)
+	const slug = tryDecodeURI(match.substring(match.lastIndexOf('/') + 1));
+	const clean = slug
+		.replace(NOTION_UUID_SUFFIX_REGEX, '')
 		.split('-')
-		.slice(0, -1)
-		.join(' '))}]]`;
+		.filter(Boolean)
+		.join(' ')
+		.trim();
+	return `[[${clean || slug}]]`;
 };
 
 const convertRelativePath = (path) => {
 	vlog(4, `Converting relative path: ${path}`);
-	return `[[${tryDecodeURI(path.split('/').pop().split('%20').slice(0, -1).join(' '))}]]`;
+	const normalized = tryDecodeURI(path).replace(/\\/g, '/');
+	const last = normalized.split('/').pop() || normalized;
+	const ext = npath.extname(last);
+	const stem = ext ? last.slice(0, -ext.length) : last;
+	const cleanStem = stem.replace(NOTION_UUID_SUFFIX_REGEX, '').trim();
+	if (ext.toLowerCase() === '.csv') {
+		return `[[${cleanStem}.csv]]`;
+	}
+	return `[[${cleanStem}]]`;
 };
 
 const correctCSVLinks = (content) => {
@@ -340,12 +358,15 @@ const convertDirectory = function (path) {
 	for (let i = 0; i < files.length; i++) {
 		let file = files[i];
 		vlog(3, `Converting file: ${file}`);
-		if (!file.includes('.png')) {
+		// Preserve media file names. Only trim Notion UUID suffix on markdown/csv and other text files.
+		if (!/\.(png|jpg|jpeg|gif|webp|svg|mp4|mov|m4a|mp3|wav|pdf)$/i.test(file)) {
 			let trunc = truncateFileName(file);
-			vlog(3, `Renaming file ${file} -> ${trunc}`);
-			fs.renameSync(file, trunc);
-			file = trunc;
-			files[i] = trunc;
+			if (trunc !== file) {
+				vlog(3, `Renaming file ${file} -> ${trunc}`);
+				fs.renameSync(file, trunc);
+				file = trunc;
+				files[i] = trunc;
+			}
 		}
 
 		//Fix Markdown Links
@@ -392,6 +413,9 @@ const convertDirectory = function (path) {
 		let dir = directories[i];
 		vlog(4, `Truncating directory name: ${dir}`);
 		let dest = truncateDirName(dir);
+		if (dest === dir) {
+			continue;
+		}
 		while (fs.existsSync(dest)) {
 			vlog(4, `Truncated directory name already exists" ${dest}`);
 			dest = `${dest} - ${Math.random().toString(36).slice(2)}`;
